@@ -1,0 +1,136 @@
+---
+title: "Practical Machine Learning Assignment"
+author: "Pinja Haikka"
+date: "8/31/2017"
+output: html_document
+---
+
+```{r setup, include=FALSE, warning = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+We study how raw data on performing wieght lifitng exercise predicts how well the exercise was executed. In our dataset, downloaded from http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har, variable 'classe' denotes how well the exercise was executed, with A representing a perfect executing and B-E representing common mistakes.
+
+First download the R packages used in this report.
+
+```{r, message=FALSE, warning=FALSE}
+library(caret) # for running the classification algorithm
+library(plyr); library(dplyr) # for data handling
+library(ggplot2) # for plotting
+library(reshape2) # for plotting
+```
+
+Next download the training and testing datasets and transform 'classe' into a categorical variable.
+
+```{r}
+# load data
+training <- read.csv('pml-training.csv', stringsAsFactors = FALSE)
+testing <- read.csv('pml-testing.csv', stringsAsFactors = FALSE)
+# class to predict
+training$classe <- as.factor(training$classe)
+```
+
+The datasets need to be cleaned before building the predictive algorithm. First we remove remove the first columns that include information on names, timestamps etc.
+
+```{r}
+training <- training[, -c(1:7)]
+testing <- testing[, -c(1:7)]
+```
+
+We observe that the data frames contain many missing variables. Some of the data is imported as characters, including entries like "#DIV/0!", and otherwise contaning predomonantly missing values. We identify and remove these variables.
+
+```{r}
+# identify character columns
+chrCols <- sapply(training, is.character)
+# check what fraction is empty entries
+colSums(training[, chrCols] == '')/nrow(training)
+# character columns are mostly empty data >>> discard them
+training <- training[, !chrCols]
+testing <- testing[, !chrCols]
+```
+
+With the remaining data we still observe that many variables only contain NAs, and discard all variables with over 50% missing values.
+
+```{r}
+# check what fraction is NAs
+colSums(is.na(training))/nrow(training)
+# remove the ones where over 50% is NAs
+removeNA <- colSums(is.na(training))/nrow(training) > 0.5
+training <- training[, !removeNA]
+testing <- testing[, !removeNA]
+```
+
+The data frames, which now consist of 52 predictors and the class to be predicted, no longer contain missing values. 
+
+```{r}
+table(complete.cases(training))
+```
+
+We next do a visual inspection of the data. First check how balanced the classes are in the training set.
+
+```{r}
+plot(table(training$classe))
+```
+
+The classes are well balanced, so there is no need to account for skewness of class distibution.
+
+```{r, message=FALSE, warning=FALSE}
+df <- melt(training, variable.name = 'predictors')
+ggplot(df, aes(value)) + geom_histogram() + facet_wrap(~ predictors, scales = 'free')
+```
+
+Plotting the predictors reveals that some of them (gyros_forearm_y/z, gyros_dumbbell_x/y/z) are very skewed. A close inspection shows that this is due to one observation having values that are orders or magnitude away from all other observations.
+
+```{r}
+plot(training$gyros_forearm_x)
+```
+
+This outlier is likely due to a bug or a human error in the recording of the values, and since it is only a single observation, we remove it from the dataset. 
+
+```{r}
+# identify and remove this outlier
+outlier <- which(training$gyros_forearm_x < -10)
+training <- training[-outlier, ]
+```
+
+After removing the outlier observation all predictors look well balanced.
+
+```{r, message=FALSE, warning=FALSE}
+df <- melt(training, variable.name = 'predictors')
+ggplot(df, aes(value, fill = classe)) + geom_histogram() + facet_wrap(~ predictors, scales = 'free')
+```
+
+Coloring the predictor distibutions accoridng their class does not reveal any obvious separation of values according to how the exercise was executed. This may indicate that meny variables play together to determine the class, so we include them all in the analysis. Including many variables in a predictive model can lead to overfitting, so we include a 10-fold cross validation to prevent that. We use a boosted regression model to predict the exercise class.
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+trainCtrl <- trainControl(method="cv", number = 7, repeats=3, savePredictions = TRUE)
+fit.gbm <- train(classe ~., data = training, method = 'gbm', trControl = trainCtrl)
+print(fit.gbm)
+```
+
+The in-sample accuracy is pretty high with value 0.97.
+
+```{r}
+predInSample <- predict(fit.gbm)
+confusionMatrix(predInSample, training$classe)
+```
+
+We can use the results of the cross-validation to estimate the out-of-sample accuracy and expceterd error.
+
+```{r}
+cv.predictions <- fit.gbm$pred
+# check the results of the final model only
+cv.predictions.final <- filter(cv.predictions, n.trees == 150, interaction.depth == 3, shrinkage == 0.1)
+# caculate the accuracy of each fold
+cv.acc <- ddply(cv.predictions.final, "Resample", summarise, acc = sum(pred == obs)/length(pred))
+# and from that the mean and standard deviation of the accuracy
+mean(cv.acc$acc)
+sd(cv.acc$acc)
+```
+
+The mean out-of-sample error (1-accuracy) is 0.036, so the prediction is wrong on average 3% of the time. This is a good result, and we use that for predicting the values from the testing set.
+
+```{r}
+predict(fit.gbm, testing)
+```
+
